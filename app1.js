@@ -25,7 +25,7 @@ let clientCounter = 0; // Unique numeric counter for client IDs
 app.use(express.static('public')); // Serve static client files (HTML/JS/CSS, etc)
 
 // ===== CONFIGURATION SECTION =====
-const RPC_URL = "https://api.mainnet-beta.solana.com"; // Connection to Solana
+const RPC_URL = "https://api.devnet.solana.com"; // Connection to Solana
 const connection = new Connection(RPC_URL, 'confirmed'); // Connect at highest finality
 
 const VAULT_WALLET = new PublicKey("6ZJ1Zy8vE6FivX3vK77LkZq2q9i6CqpNzWWu6hxv7RtW"); // Wallet holding the vault funds
