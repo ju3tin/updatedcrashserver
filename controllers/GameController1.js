@@ -10,6 +10,58 @@ let currentMultiplier = 1.0;    // Full precision
 let gameState = "waiting";      // "waiting" | "running" | "ended"
 let isRunning = false;
 let timeElapsed = 0;
+const { Connection, PublicKey } = require('@solana/web3.js'); // Solana RPC access
+
+//const RPC_URL = "https://api.mainnet-beta.solana.com"; // Connection to Solana
+const RPC_URL = "https://api.devnet.solana.com";
+const connection = new Connection(RPC_URL, 'confirmed'); // Connect at highest finality
+
+const VAULT_WALLET = new PublicKey("6ZJ1Zy8vE6FivX3vK77LkZq2q9i6CqpNzWWu6hxv7RtW"); // Wallet holding the vault funds
+const TOKEN_MINT = null; // USDC mint, or set null for native SOL vault
+
+
+//const TOKEN_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC mint, or set null for native SOL vault
+//const VAULT_WALLET = new PublicKey("YOUR_VAULT_WALLET_ADDRESS_HERE"); // ← change for your deployment
+//const TOKEN_MINT = null; // null = use SOL, or provide custom SPL mint for USDC, USDT, etc
+
+const VAULT_DISPLAY_MULTIPLIER = 8;     // Multiplier for UI (show a bigger vault to players)
+const MAX_PROFIT_PERCENT = 0.30;        // Max payout per round (30% of vault)
+const MAX_BET_RATIO = 0.08;             // Max bet per user as fraction of vault
+const SYNC_INTERVAL = 15000;            // On-chain vault refresh interval, ms
+
+let vault = 0;          // Real vault (on-chain), SOL or tokens
+let displayedVault = 0; // Vault shown publicly, usually bigger
+let lastKnownVault = 0; // Fallback
+
+
+async function updateVaultFromChain() {
+  try {
+    let balance;
+    if (!TOKEN_MINT) {
+      // Native SOL balance mode
+      balance = await connection.getBalance(VAULT_WALLET);
+      vault = balance / 1e9; // lamports → SOL
+    } else {
+      // SPL Token mode (USDC, etc)
+      const ata = await getAssociatedTokenAddress(TOKEN_MINT, VAULT_WALLET);
+      try {
+        const tokenAccount = await getAccount(connection, ata);
+        vault = Number(tokenAccount.amount) / Math.pow(10, tokenAccount.mint.decimals || 6);
+      } catch (e) {
+        vault = 0; // No token account on chain yet
+      }
+    }
+    lastKnownVault = vault;
+    displayedVault = Math.floor(vault * VAULT_DISPLAY_MULTIPLIER);
+    console.log(`Vault updated: ${vault.toFixed(6)} → Players see: ${displayedVault}`);
+    broadcast(wss, {action:"vault-updated", vault: displayedVault });
+  } catch (err) {
+    console.error("Failed to fetch vault:", err.message);
+    vault = lastKnownVault; // fallback to previous on error
+  }
+}
+
+
 
 // ----------------- Helper Functions -----------------
 function sha256(input) {
@@ -130,6 +182,31 @@ async function startGame(wss) {
   } catch (err) {
     console.error("❌ Error in startGame:", err);
   }
+  try {
+    let balance;
+    if (!TOKEN_MINT) {
+      // Native SOL balance mode
+      balance = await connection.getBalance(VAULT_WALLET);
+      vault = balance / 1e9; // lamports → SOL
+    } else {
+      // SPL Token mode (USDC, etc)
+      const ata = await getAssociatedTokenAddress(TOKEN_MINT, VAULT_WALLET);
+      try {
+        const tokenAccount = await getAccount(connection, ata);
+        vault = Number(tokenAccount.amount) / Math.pow(10, tokenAccount.mint.decimals || 6);
+      } catch (e) {
+        vault = 0; // No token account on chain yet
+      }
+    }
+    lastKnownVault = vault;
+    displayedVault = Math.floor(vault * VAULT_DISPLAY_MULTIPLIER);
+    console.log(`Vault updated: ${vault.toFixed(6)} → Players see: ${displayedVault}`);
+    broadcast(wss, {action:"vault-updated", vault: displayedVault });
+  } catch (err) {
+    console.error("Failed to fetch vault:", err.message);
+    vault = lastKnownVault; // fallback to previous on error
+  }
+
 }
 
 // ----------------- End Game -----------------

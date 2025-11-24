@@ -239,6 +239,11 @@ wss.on('connection', (ws) => {
         if (!currentRound || currentRound.status !== 'waiting')
           return ws.send(JSON.stringify({ action: 'error', payload: { msg: 'Too late' } }));
         const amount = Number(payload.amount);
+        // ENFORCE: No bet can be more than 30% of real Solana vault at the time of bet
+        const MAX_ABS_BET = 0.3 * vault; // real on-chain
+        if (amount > MAX_ABS_BET)
+          return ws.send(JSON.stringify({ action: 'error', payload: { msg: `Max bet: ${(MAX_ABS_BET).toFixed(4)} (30% of real vault)` } }));
+        // Still enforce stricter limit if MAX_BET_RATIO is lower
         if (amount > vault * MAX_BET_RATIO)
           return ws.send(JSON.stringify({ action: 'error', payload: { msg: `Max bet: ${(vault * MAX_BET_RATIO).toFixed(4)}` } }));
         const bet = {
@@ -251,7 +256,7 @@ wss.on('connection', (ws) => {
         currentRound.bets.push(bet);
         // Broadcast bet placement to all clients
         broadcast(wss, {
-          action: 'ROUND_STARTED',
+          action: 'bet-placed',
           username: bet.username,
           amount: bet.amount,
           auto: bet.autoCashout
