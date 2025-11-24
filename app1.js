@@ -40,8 +40,8 @@ let displayedVault = 0;
 let lastKnownVault = 0;
 
 // Utility: broadcast to all clients
-function broadcast(event, payload) {
-  const message = JSON.stringify({ event, payload });
+function broadcast(action, payload) {
+  const message = JSON.stringify({ action, payload });
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) client.send(message);
   });
@@ -175,11 +175,11 @@ function endRound() {
   setTimeout(startNewRound, 8000);
 }
 
-// ====================== WEBSOCKET EVENTS ======================
+// ====================== WEBSOCKET actionS ======================
 wss.on('connection', (ws) => {
   const clientId = `ws-${++clientCounter}`;
   wsClients.set(ws, { id: clientId, username: `Player-${clientCounter}` });
-  ws.send(JSON.stringify({ event: 'init', payload: {
+  ws.send(JSON.stringify({ action: 'init', payload: {
     vault: displayedVault,
     history,
     serverSeedHashed: crypto.createHash('sha256').update(serverSeed).digest('hex'),
@@ -188,17 +188,17 @@ wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
     let data;
     try { data = JSON.parse(raw); }
-    catch { return ws.send(JSON.stringify({ event: 'error', payload: { msg: 'Invalid JSON payload' } })); }
+    catch { return ws.send(JSON.stringify({ action: 'error', payload: { msg: 'Invalid JSON payload' } })); }
     const client = wsClients.get(ws);
     if (!client) return;
     const payload = data.payload || {};
-    switch(data.event) {
+    switch(data.action) {
       case 'place-bet': {
         if (!currentRound || currentRound.status !== 'waiting')
-          return ws.send(JSON.stringify({ event: 'error', payload: { msg: 'Too late' } }));
+          return ws.send(JSON.stringify({ action: 'error', payload: { msg: 'Too late' } }));
         const amount = Number(payload.amount);
         if (amount > vault * MAX_BET_RATIO)
-          return ws.send(JSON.stringify({ event: 'error', payload: { msg: `Max bet: ${(vault * MAX_BET_RATIO).toFixed(4)}` } }));
+          return ws.send(JSON.stringify({ action: 'error', payload: { msg: `Max bet: ${(vault * MAX_BET_RATIO).toFixed(4)}` } }));
         const bet = {
           userId: client.id,
           username: (payload.username?.slice(0,12)) || client.username || 'Anon',
@@ -230,12 +230,12 @@ wss.on('connection', (ws) => {
       case 'set-username': {
         if (typeof payload.username === 'string' && payload.username.trim()) {
           client.username = payload.username.slice(0,12);
-          ws.send(JSON.stringify({ event: 'username-updated', payload: { username: client.username } }));
+          ws.send(JSON.stringify({ action: 'username-updated', payload: { username: client.username } }));
         }
         break;
       }
       default:
-        ws.send(JSON.stringify({ event: 'error', payload: { msg: 'Unknown event' } }));
+        ws.send(JSON.stringify({ action: 'error', payload: { msg: 'Unknown action' } }));
     }
   });
   ws.on('close', () => {
@@ -262,9 +262,20 @@ setTimeout(() => {
   startNewRound();
 }, 3000);
 
+
 server.listen(3000, () => {
   console.log("\nSOLANA VAULT CRASH LIVE");
   console.log("http://localhost:3000");
   console.log("Vault wallet:", VAULT_WALLET.toBase58());
   console.log("Token:", TOKEN_MINT ? TOKEN_MINT.toBase58() : "Native SOL");
+});
+
+app.get("/api/status", async (req, res) => {
+  const GameRound = require("./models/GameRound");
+  const lastRound = await GameRound.findOne().sort({ startTime: -1 }).exec();
+  res.json({
+    currentRoundId: lastRound ? lastRound._id : null,
+    seedHash: lastRound ? lastRound.seedHash : null,
+    crashMultiplier: lastRound ? lastRound.crashMultiplier : null,
+  });
 });
