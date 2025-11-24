@@ -1,14 +1,16 @@
 // server.js - SOLANA + SPL TOKEN VAULT CRASH (real on-chain balance)
 const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
+const WebSocket = require('ws');
 const crypto = require('crypto');
 const { Connection, PublicKey } = require('@solana/web3.js');
 const { getAssociatedTokenAddress, getAccount } = require('@solana/spl-token');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, { cors: { origin: "*" } });
+const wss = new WebSocket.Server({ server });
+const wsClients = new Map(); // ws -> { id, username }
+let clientCounter = 0;
 app.use(express.static('public'));
 
 // ====================== CONFIG ======================
@@ -29,6 +31,14 @@ const SYNC_INTERVAL = 15000;            // Refresh vault every 15s
 let vault = 0;          // Real on-chain balance (in smallest unit: lamports or token decimals)
 let displayedVault = 0;
 let lastKnownVault = 0;
+
+// Utility: broadcast to all clients
+function broadcast(event, payload) {
+  const message = JSON.stringify({ event, payload });
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) client.send(message);
+  });
+}
 
 // ====================== FETCH VAULT FROM SOLANA ======================
 async function updateVaultFromChain() {
@@ -53,7 +63,7 @@ async function updateVaultFromChain() {
     displayedVault = Math.floor(vault * VAULT_DISPLAY_MULTIPLIER);
 
     console.log(`Vault updated: ${vault.toFixed(6)} → Players see: ${displayedVault}`);
-    io.emit('vault-updated', { vault: displayedVault });
+    broadcast('vault-updated', { vault: displayedVault });
 
   } catch (err) {
     console.error("Failed to fetch vault:", err.message);
@@ -90,7 +100,7 @@ function startNewRound() {
     bets: []
   };
 
-  io.emit('round-starting', {
+  broadcast('round-starting', {
     roundId: currentRound.id,
     hash: crypto.createHash('sha256').update(serverSeed + '-' + clientSeed + '-' + roundNonce).digest('hex'),
     nextClientSeed: clientSeed,
@@ -101,7 +111,7 @@ function startNewRound() {
   setTimeout(() => {
     currentRound.status = 'running';
     currentRound.startedAt = Date.now();
-    io.emit('round-started', { roundId: currentRound.id });
+    broadcast('round-started', { roundId: currentRound.id });
     tickGame();
   }, 6000);
 }
@@ -112,7 +122,7 @@ function tickGame() {
   const target = 1 + (elapsed / 10);
   currentRound.multiplier = Math.min(target * 8, currentRound.crashPoint + 0.05);
 
-  io.emit('tick', {
+  broadcast('tick', {
     multiplier: parseFloat(currentRound.multiplier.toFixed(2)),
     vault: displayedVault
   });
@@ -140,7 +150,7 @@ function endRound() {
   if (totalPayout > maxLoss && winners.length > 0) {
     const ratio = maxLoss / totalPayout;
     winners.forEach(w => w.payout *= ratio);
-    io.emit('max-profit-hit', { reduction: ((1 - ratio) * 100).toFixed(1) });
+    broadcast('max-profit-hit', { reduction: ((1 - ratio) * 100).toFixed(1) });
   }
 
   history.unshift({
@@ -149,7 +159,7 @@ function endRound() {
   });
   if (history.length > 20) history.pop();
 
-  io.emit('round-crashed', {
+  broadcast('round-crashed', {
     crashPoint: parseFloat(currentRound.crashPoint.toFixed(2)),
     vault: displayedVault,
     history
@@ -158,52 +168,71 @@ function endRound() {
   setTimeout(startNewRound, 8000);
 }
 
-// ====================== SOCKET ======================
-io.on('connection', (socket) => {
-  socket.emit('init', {
+// ====================== WEBSOCKET EVENTS ======================
+wss.on('connection', (ws) => {
+  const clientId = `ws-${++clientCounter}`;
+  wsClients.set(ws, { id: clientId, username: `Player-${clientCounter}` });
+  ws.send(JSON.stringify({ event: 'init', payload: {
     vault: displayedVault,
     history,
     serverSeedHashed: crypto.createHash('sha256').update(serverSeed).digest('hex'),
     token: TOKEN_MINT ? "USDC" : "SOL"
+  } }));
+  ws.on('message', (raw) => {
+    let data;
+    try { data = JSON.parse(raw); }
+    catch { return ws.send(JSON.stringify({ event: 'error', payload: { msg: 'Invalid JSON payload' } })); }
+    const client = wsClients.get(ws);
+    if (!client) return;
+    const payload = data.payload || {};
+    switch(data.event) {
+      case 'place-bet': {
+        if (!currentRound || currentRound.status !== 'waiting')
+          return ws.send(JSON.stringify({ event: 'error', payload: { msg: 'Too late' } }));
+        const amount = Number(payload.amount);
+        if (amount > vault * MAX_BET_RATIO)
+          return ws.send(JSON.stringify({ event: 'error', payload: { msg: `Max bet: ${(vault * MAX_BET_RATIO).toFixed(4)}` } }));
+        const bet = {
+          userId: client.id,
+          username: (payload.username?.slice(0,12)) || client.username || 'Anon',
+          amount,
+          autoCashout: payload.autoCashout > 1.01 ? Number(payload.autoCashout) : null,
+          cashoutAt: null
+        };
+        currentRound.bets.push(bet);
+        broadcast('bet-placed', {
+          username: bet.username,
+          amount: bet.amount,
+          auto: bet.autoCashout
+        });
+        break;
+      }
+      case 'cashout': {
+        if (!currentRound || currentRound.status !== 'running') return;
+        const bet = currentRound.bets.find(b => b.userId === client.id && !b.cashoutAt);
+        if (!bet) return;
+        bet.cashoutAt = currentRound.multiplier;
+        const profit = bet.amount * (bet.cashoutAt - 1);
+        broadcast('player-cashout', {
+          username: bet.username,
+          multiplier: bet.cashoutAt.toFixed(2),
+          profit: profit.toFixed(4)
+        });
+        break;
+      }
+      case 'set-username': {
+        if (typeof payload.username === 'string' && payload.username.trim()) {
+          client.username = payload.username.slice(0,12);
+          ws.send(JSON.stringify({ event: 'username-updated', payload: { username: client.username } }));
+        }
+        break;
+      }
+      default:
+        ws.send(JSON.stringify({ event: 'error', payload: { msg: 'Unknown event' } }));
+    }
   });
-
-  socket.on('place-bet', (data) => {
-    if (!currentRound || currentRound.status !== 'waiting') return socket.emit('error', 'Too late');
-
-    const amount = Number(data.amount);
-    if (amount > vault * MAX_BET_RATIO)
-      return socket.emit('error', `Max bet: ${(vault * MAX_BET_RATIO).toFixed(4)}`);
-
-    const bet = {
-      userId: socket.id,
-      username: data.username?.slice(0,12) || "Anon",
-      amount,
-      autoCashout: data.autoCashout > 1.01 ? Number(data.autoCashout) : null,
-      cashoutAt: null
-    };
-
-    currentRound.bets.push(bet);
-
-    io.emit('bet-placed', {
-      username: bet.username,
-      amount: bet.amount,
-      auto: bet.autoCashout
-    });
-  });
-
-  socket.on('cashout', () => {
-    if (!currentRound || currentRound.status !== 'running') return;
-    const bet = currentRound.bets.find(b => b.userId === socket.id && !b.cashoutAt);
-    if (!bet) return;
-
-    bet.cashoutAt = currentRound.multiplier;
-    const profit = bet.amount * (bet.cashoutAt - 1);
-
-    io.emit('player-cashout', {
-      username: bet.username,
-      multiplier: bet.cashoutAt.toFixed(2),
-      profit: profit.toFixed(4)
-    });
+  ws.on('close', () => {
+    wsClients.delete(ws);
   });
 });
 
@@ -213,7 +242,7 @@ setInterval(() => {
   currentRound.bets.forEach(bet => {
     if (!bet.cashoutAt && bet.autoCashout && currentRound.multiplier >= bet.autoCashout) {
       bet.cashoutAt = currentRound.multiplier;
-      io.emit('player-cashout', { username: bet.username, multiplier: bet.cashoutAt.toFixed(2), auto: true });
+      broadcast('player-cashout', { username: bet.username, multiplier: bet.cashoutAt.toFixed(2), auto: true });
     }
   });
 }, 100);

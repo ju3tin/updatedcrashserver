@@ -2,7 +2,7 @@
 // server.js - FINAL: FULLY ON-CHAIN + 100% PROVABLY FAIR SOLANA CRASH
 const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
+const WebSocket = require('ws');
 const crypto = require('crypto');
 const bs58 = require('bs58');
 const {
@@ -15,7 +15,30 @@ const {
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, { cors: { origin: "*" } });
+const wss = new WebSocket.Server({ server });
+const wsClients = new Map(); // ws -> metadata
+let clientCounter = 0;
+
+function broadcast(event, payload) {
+  const message = JSON.stringify({ event, payload });
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) client.send(message);
+  });
+}
+
+function sendToClient(ws, event, payload) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ event, payload }));
+  }
+}
+
+function findClientByWallet(address) {
+  for (const [ws, meta] of wsClients.entries()) {
+    if (meta.walletAddress === address) return { ws, meta };
+  }
+  return null;
+}
+
 app.use(express.static('public'));
 
 // ====================== CONFIG ======================
@@ -80,7 +103,7 @@ async function updateVault() {
       vault = Number(acc.amount) / Math.pow(10, TOKEN_DECIMALS);
     }
     displayedVault = Math.floor(vault * VAULT_DISPLAY_MULTIPLIER);
-    io.emit('vault-updated', { vault: displayedVault });
+    broadcast('vault-updated', { vault: displayedVault });
   } catch (e) { console.log("Vault error:", e); }
 }
 
@@ -147,25 +170,26 @@ async function monitorBets() {
       }
 
       if (amount >= MIN_BET && currentRound?.status === 'waiting') {
-        const socket = [...io.sockets.sockets.values()].find(s => s.walletAddress === from?.toBase58());
+        const entry = from ? findClientByWallet(from.toBase58()) : null;
+        const clientMeta = entry?.meta;
         const bet = {
           wallet: from.toBase58(),
-          username: socket?.username || from.toBase58().slice(0,8),
+          username: clientMeta?.username || from.toBase58().slice(0,8),
           amount: Number(amount.toFixed(6)),
-          autoCashout: socket?.pendingAuto || null,
+          autoCashout: clientMeta?.pendingAuto || null,
           cashoutAt: null,
-          socketId: socket?.id
+          clientId: clientMeta?.id || null
         };
 
         if (!currentRound.bets.some(b => b.wallet === bet.wallet)) {
           currentRound.bets.push(bet);
-          io.emit('bet-placed', {
+          broadcast('bet-placed', {
             username: bet.username,
             amount: bet.amount,
             wallet: bet.wallet.slice(0,6) + "...",
             verified: true
           });
-          if (socket) socket.emit('bet-confirmed', { amount: bet.amount });
+          if (entry) sendToClient(entry.ws, 'bet-confirmed', { amount: bet.amount });
         }
       }
     }
@@ -194,7 +218,7 @@ function startNewRound() {
     hashedServerSeed // revealed at round start
   };
 
-  io.emit('round-starting', {
+  broadcast('round-starting', {
     roundId: currentRound.id,
     hashedServerSeed,
     clientSeed,
@@ -206,7 +230,7 @@ function startNewRound() {
   setTimeout(() => {
     currentRound.status = 'running';
     currentRound.startedAt = Date.now();
-    io.emit('round-started', { roundId: currentRound.id });
+    broadcast('round-started', { roundId: currentRound.id });
     tickGame();
   }, 10000);
 }
@@ -216,7 +240,7 @@ function tickGame() {
   const elapsed = (Date.now() - currentRound.startedAt) / 1000;
   currentRound.multiplier = Math.min(1 + elapsed * 0.1, currentRound.crashPoint + 0.05);
 
-  io.emit('tick', {
+  broadcast('tick', {
     multiplier: currentRound.multiplier.toFixed(2),
     vault: displayedVault
   });
@@ -247,13 +271,13 @@ async function endRound() {
   if (totalPayout > vault * MAX_PROFIT_PERCENT && winners.length > 0) {
     const ratio = (vault * MAX_PROFIT_PERCENT) / totalPayout;
     winners.forEach(w => w.amount *= ratio);
-    io.emit('max-profit-hit', { msg: "Payouts reduced" });
+    broadcast('max-profit-hit', { msg: "Payouts reduced" });
   }
 
   for (const w of winners) {
     const sig = await sendPayout(w.wallet, w.amount);
     if (sig) {
-      io.emit('payout-sent', {
+      broadcast('payout-sent', {
         username: w.username,
         amount: w.amount.toFixed(4),
         tx: `https://solscan.io/tx/${sig}`
@@ -261,7 +285,7 @@ async function endRound() {
     }
   }
 
-  io.emit('round-crashed', {
+  broadcast('round-crashed', {
     crashPoint: currentRound.crashPoint.toFixed(2),
     revealedServerSeed: revealedSeed,
     clientSeed: currentRound.clientSeed,
@@ -273,29 +297,63 @@ async function endRound() {
   setTimeout(startNewRound, 12000);
 }
 
-// ====================== SOCKET ======================
-io.on('connection', (socket) => {
-  socket.emit('init', {
+// ====================== WEBSOCKET ======================
+wss.on('connection', (ws) => {
+  const clientId = `ws-${++clientCounter}`;
+  wsClients.set(ws, {
+    id: clientId,
+    username: `Player-${clientCounter}`,
+    walletAddress: null,
+    pendingAuto: null
+  });
+
+  sendToClient(ws, 'init', {
     vault: displayedVault,
     hashedServerSeed,
     token: TOKEN_MINT ? "USDC" : "SOL"
   });
 
-  socket.on('wallet-connected', (data) => {
-    socket.walletAddress = data.address;
-    socket.username = data.username || data.address.slice(0,8);
-    socket.pendingAuto = data.autoCashout;
-  });
+  ws.on('message', (raw) => {
+    let data;
+    try { data = JSON.parse(raw); }
+    catch { return sendToClient(ws, 'error', { msg: 'Invalid JSON payload' }); }
 
-  socket.on('cashout', () => {
-    if (!currentRound || currentRound.status !== 'running') return;
-    const bet = currentRound.bets.find(b => b.wallet === socket.walletAddress);
-    if (bet && !bet.cashoutAt) {
-      bet.cashoutAt = currentRound.multiplier;
-      io.emit('player-cashout', { username: socket.username, multiplier: bet.cashoutAt.toFixed(2) });
+    const meta = wsClients.get(ws);
+    if (!meta) return;
+    const payload = data.payload || {};
+
+    switch (data.event) {
+      case 'wallet-connected':
+        meta.walletAddress = payload.address;
+        meta.username = payload.username || payload.address?.slice(0,8) || meta.username;
+        meta.pendingAuto = payload.autoCashout || null;
+        sendToClient(ws, 'wallet-ack', { username: meta.username });
+        break;
+      case 'cashout':
+        handleManualCashout(meta);
+        break;
+      case 'ping':
+        sendToClient(ws, 'pong', { time: Date.now() });
+        break;
+      default:
+        sendToClient(ws, 'error', { msg: 'Unknown event' });
     }
   });
+
+  ws.on('close', () => {
+    wsClients.delete(ws);
+  });
 });
+
+function handleManualCashout(meta) {
+  if (!currentRound || currentRound.status !== 'running') return;
+  if (!meta.walletAddress) return;
+  const bet = currentRound.bets.find(b => b.wallet === meta.walletAddress);
+  if (bet && !bet.cashoutAt) {
+    bet.cashoutAt = currentRound.multiplier;
+    broadcast('player-cashout', { username: meta.username, multiplier: bet.cashoutAt.toFixed(2) });
+  }
+}
 
 // ====================== AUTO-CASHOUT ======================
 setInterval(() => {
@@ -303,7 +361,7 @@ setInterval(() => {
   currentRound.bets.forEach(bet => {
     if (!bet.cashoutAt && bet.autoCashout && currentRound.multiplier >= bet.autoCashout) {
       bet.cashoutAt = currentRound.multiplier;
-      io.emit('player-cashout', { username: bet.username, multiplier: bet.cashoutAt.toFixed(2), auto: true });
+      broadcast('player-cashout', { username: bet.username, multiplier: bet.cashoutAt.toFixed(2), auto: true });
     }
   });
 }, 100);
