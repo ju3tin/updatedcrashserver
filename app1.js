@@ -129,10 +129,16 @@ function tickGame() {
   const target = 1 + (elapsed / 10);
   currentRound.multiplier = Math.min(target * 8, currentRound.crashPoint + 0.05);
 
-  broadcast('CNT_MULTIPLY', {
+ /* broadcast('CNT_MULTIPLY', {
+    multiplier: parseFloat(currentRound.multiplier.toFixed(2)),
+    vault: displayedVault
+  }); */
+  broadcast(wss, {
+    action: "CNT_MULTIPLY",
     multiplier: parseFloat(currentRound.multiplier.toFixed(2)),
     vault: displayedVault
   });
+
 
   if (currentRound.multiplier >= currentRound.crashPoint) endRound();
   else setTimeout(tickGame, 100);
