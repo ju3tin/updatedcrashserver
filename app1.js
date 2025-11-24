@@ -118,7 +118,7 @@ function startNewRound() {
   setTimeout(() => {
     currentRound.status = 'running';
     currentRound.startedAt = Date.now();
-    broadcast('round-started', { roundId: currentRound.id });
+    broadcast('ROUND_STARTED', { roundId: currentRound.id });
     tickGame();
   }, 6000);
 }
