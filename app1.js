@@ -107,7 +107,7 @@ function startNewRound() {
     bets: []
   };
 
-  broadcast('round-starting', {
+  broadcast('ROUND_STARTED', {
     roundId: currentRound.id,
     hash: crypto.createHash('sha256').update(serverSeed + '-' + clientSeed + '-' + roundNonce).digest('hex'),
     nextClientSeed: clientSeed,
