@@ -81,7 +81,7 @@ async function updateVaultFromChain() {
     lastKnownVault = vault;
     displayedVault = Math.floor(vault * VAULT_DISPLAY_MULTIPLIER);
     console.log(`Vault updated: ${vault.toFixed(6)} → Players see: ${displayedVault}`);
-    broadcast("vault-updated", { vault: displayedVault });
+    broadcast(wss, {action:"vault-updated", vault: displayedVault });
   } catch (err) {
     console.error("Failed to fetch vault:", err.message);
     vault = lastKnownVault; // fallback to previous on error
@@ -148,7 +148,8 @@ function tickGame() {
   const elapsed = (Date.now() - currentRound.startedAt) / 1000;
   const target = 1 + (elapsed / 10); // growth formula for demo
   currentRound.multiplier = Math.min(target * 8, currentRound.crashPoint + 0.05);
-  broadcast('CNT_MULTIPLY', {
+  broadcast(wss, {
+    action: 'CNT_MULTIPLY',
     multiplier: parseFloat(currentRound.multiplier.toFixed(2)),
     vault: displayedVault,
   });
@@ -176,13 +177,14 @@ function endRound() {
   if (totalPayout > maxLoss && winners.length > 0) {
     const ratio = maxLoss / totalPayout;
     winners.forEach(w => w.payout *= ratio);
-    broadcast('max-profit-hit', { reduction: ((1 - ratio) * 100).toFixed(1) });
+    broadcast(wss, {action:'max-profit-hit', reduction: ((1 - ratio) * 100).toFixed(1) });
   }
   // Record round to history for chart/recap
   history.unshift({ crash: parseFloat(currentRound.crashPoint.toFixed(2)), vaultAfter: displayedVault });
   if (history.length > 20) history.pop();
   // Notify all clients about the round crash/outcome
-  broadcast('ROUND_CRASHED', {
+  broadcast(wss,{
+    action:'ROUND_CRASHED', 
     crashPoint: parseFloat(currentRound.crashPoint.toFixed(2)),
     vault: displayedVault,
     history
@@ -246,7 +248,8 @@ wss.on('connection', (ws) => {
         bet.cashoutAt = currentRound.multiplier;
         const profit = bet.amount * (bet.cashoutAt - 1);
         // Notify all: this player cashed out
-        broadcast('player-cashout', {
+        broadcast(wss, {
+          action:'player-cashout',
           username: bet.username,
           multiplier: bet.cashoutAt.toFixed(2),
           profit: profit.toFixed(4)
@@ -280,7 +283,8 @@ setInterval(() => {
   currentRound.bets.forEach(bet => {
     if (!bet.cashoutAt && bet.autoCashout && currentRound.multiplier >= bet.autoCashout) {
       bet.cashoutAt = currentRound.multiplier;
-      broadcast('player-cashout', {
+      broadcast(wss, {
+        action:'player-cashout',
         username: bet.username, multiplier: bet.cashoutAt.toFixed(2), auto: true
       });
     }
