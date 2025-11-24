@@ -107,7 +107,8 @@ function startNewRound() {
     bets: []
   };
 
-  broadcast('ROUND_STARTED', {
+  broadcast(wss, {
+    action: 'ROUND_STARTED',
     roundId: currentRound.id,
     hash: crypto.createHash('sha256').update(serverSeed + '-' + clientSeed + '-' + roundNonce).digest('hex'),
     nextClientSeed: clientSeed,
@@ -172,7 +173,9 @@ function endRound() {
   });
   if (history.length > 20) history.pop();
 
-  broadcast('ROUND_CRASHED', {
+
+  broadcast(wss, {
+    action: "ROUND_CRASHED",
     crashPoint: parseFloat(currentRound.crashPoint.toFixed(2)),
     vault: displayedVault,
     history
