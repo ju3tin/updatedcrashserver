@@ -70,7 +70,7 @@ async function updateVaultFromChain() {
     displayedVault = Math.floor(vault * VAULT_DISPLAY_MULTIPLIER);
 
     console.log(`Vault updated: ${vault.toFixed(6)} → Players see: ${displayedVault}`);
-    broadcast('vault-updated', { vault: displayedVault });
+   broadcast(wss,  { action: "vault-updated",vault: displayedVault });
 
   } catch (err) {
     console.error("Failed to fetch vault:", err.message);
@@ -119,7 +119,7 @@ function startNewRound() {
   setTimeout(() => {
     currentRound.status = 'running';
     currentRound.startedAt = Date.now();
-    broadcast('ROUND_STARTED', { roundId: currentRound.id });
+    broadcast(wss, {action:"ROUND_STARTED", roundId: currentRound.id });
     tickGame();
   }, 6000);
 }
