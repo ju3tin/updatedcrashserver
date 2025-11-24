@@ -164,7 +164,7 @@ function endRound() {
   if (totalPayout > maxLoss && winners.length > 0) {
     const ratio = maxLoss / totalPayout;
     winners.forEach(w => w.payout *= ratio);
-    broadcast('max-profit-hit', { reduction: ((1 - ratio) * 100).toFixed(1) });
+    broadcast(wss, {action:'max-profit-hit', reduction: ((1 - ratio) * 100).toFixed(1) });
   }
 
   history.unshift({
@@ -216,7 +216,8 @@ wss.on('connection', (ws) => {
           cashoutAt: null
         };
         currentRound.bets.push(bet);
-        broadcast('bet-placed', {
+        broadcast(wss, {
+          action:'bet-placed',
           username: bet.username,
           amount: bet.amount,
           auto: bet.autoCashout
