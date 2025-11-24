@@ -123,7 +123,8 @@ function startNewRound() {
     status: 'waiting', // waiting → running → crashed
     bets: [] // bets are added as users join
   };
-  broadcast('ROUND_STARTED', {
+  broadcast(wss, {
+    action: 'ROUND_STARTED',
     roundId: currentRound.id,
     hash: crypto.createHash('sha256').update(serverSeed + '-' + clientSeed + '-' + roundNonce).digest('hex'),
     nextClientSeed: clientSeed,
@@ -133,7 +134,7 @@ function startNewRound() {
   setTimeout(() => {
     currentRound.status = 'running';
     currentRound.startedAt = Date.now();
-    broadcast('ROUND_STARTED', { roundId: currentRound.id });
+    broadcast(wss, { action:'ROUND_STARTED',roundId: currentRound.id });
     tickGame();
   }, 6000);
 }
@@ -229,7 +230,8 @@ wss.on('connection', (ws) => {
         };
         currentRound.bets.push(bet);
         // Broadcast bet placement to all clients
-        broadcast('bet-placed', {
+        broadcast(wss, {
+          action: 'ROUND_STARTED',
           username: bet.username,
           amount: bet.amount,
           auto: bet.autoCashout
