@@ -110,6 +110,7 @@ function generateCrashPoint() {
 
 /**
  * Starts a new round, broadcasts new round to players, and sets a 6-second betting window.
+ * During the betting period, broadcast a countdown every second.
  */
 function startNewRound() {
   roundNonce++;
@@ -123,20 +124,37 @@ function startNewRound() {
     status: 'waiting', // waiting → running → crashed
     bets: [] // bets are added as users join
   };
+
+  const BETTING_SECONDS = 6;
+  let timeLeft = BETTING_SECONDS;
+
+  // Broadcast initial betting phase start info (with full time left)
   broadcast(wss, {
     action: 'ROUND_STARTED',
     roundId: currentRound.id,
     hash: crypto.createHash('sha256').update(serverSeed + '-' + clientSeed + '-' + roundNonce).digest('hex'),
     nextClientSeed: clientSeed,
-    timeLeft: 6,
+    timeLeft,
     vault: displayedVault
   });
+
+  // Countdown ticker interval: send `countdown` to all clients
+  const countdownInterval = setInterval(() => {
+    timeLeft--;
+    if (timeLeft > 0) {
+      broadcast(wss, { action: 'countdown', timeLeft });
+    } else {
+      clearInterval(countdownInterval);
+    }
+  }, 1000);
+
+  // After countdown, start the round
   setTimeout(() => {
     currentRound.status = 'running';
     currentRound.startedAt = Date.now();
-    broadcast(wss, { action:'ROUND_STARTED',roundId: currentRound.id });
+    broadcast(wss, { action:'ROUND_STARTED', roundId: currentRound.id });
     tickGame();
-  }, 6000);
+  }, BETTING_SECONDS * 1000);
 }
 
 /**
