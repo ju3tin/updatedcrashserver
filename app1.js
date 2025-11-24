@@ -6,6 +6,12 @@ const WebSocket = require('ws');
 const crypto = require('crypto');
 const { Connection, PublicKey } = require('@solana/web3.js');
 const { getAssociatedTokenAddress, getAccount } = require('@solana/spl-token');
+const mongoose = require("mongoose");
+const path = require("path");
+
+
+const { startGame, handleBet, handleCashout } = require("./controllers/GameController");
+
 
 const app = express();
 const server = http.createServer(app);
