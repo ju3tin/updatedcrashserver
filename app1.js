@@ -142,7 +142,7 @@ function startNewRound() {
   const countdownInterval = setInterval(() => {
     timeLeft--;
     if (timeLeft > 0) {
-      broadcast(wss, { action: 'countdown', timeLeft });
+      broadcast(wss, { action: 'COUNTDOWN', timeLeft });
     } else {
       clearInterval(countdownInterval);
     }
