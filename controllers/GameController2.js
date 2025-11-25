@@ -7,7 +7,7 @@ const { Connection, PublicKey } = require('@solana/web3.js');
 
 // ----------------- Configuration -----------------
 const RPC_URL = "https://api.mainnet-beta.solana.com"; // Change to devnet if needed
-// const RPC_URL = "https://api.devnet.solana.com";
+// const RPC_URL = "https://api.devnet.solana.com"; 
 
 const connection = new Connection(RPC_URL, 'confirmed');
 
