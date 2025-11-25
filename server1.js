@@ -4,13 +4,13 @@
 require("dotenv").config();
 const express = require("express");
 const http = require("http");
-//const { WebSocketServer } = require("ws").Server;
+const { WebSocketServer } = require("ws");
 const mongoose = require("mongoose");
 const path = require("path");
 
 // Import controller functions that contain game logic
-const { startGame, handleBet, handleCashout } = require("./controllers/GameController1");
-new WebSocketServer();
+const { startGame, handleBet, handleCashout } = require("./controllers/GameController");
+
 // Environment variables
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/bustafair";
 const PORT = parseInt(process.env.PORT || "3000", 10);
