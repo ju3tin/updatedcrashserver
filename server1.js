@@ -9,7 +9,7 @@ const mongoose = require("mongoose");
 const path = require("path");
 
 // Import controller functions that contain game logic
-const { startGame, handleBet, handleCashout } = require("./controllers/GameController");
+const { startGame, handleBet, handleCashout } = require("./controllers/GameController1");
 
 // Environment variables
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/bustafair";
