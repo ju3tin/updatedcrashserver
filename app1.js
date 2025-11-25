@@ -125,7 +125,7 @@ function startNewRound() {
     bets: [] // bets are added as users join
   };
 
-  const BETTING_SECONDS = 6;
+  const BETTING_SECONDS = 10;
   let timeLeft = BETTING_SECONDS;
 
   // Broadcast initial betting phase start info (with full time left)
@@ -142,7 +142,8 @@ function startNewRound() {
   const countdownInterval = setInterval(() => {
     timeLeft--;
     if (timeLeft > 0) {
-      broadcast(wss, { action: 'COUNTDOWN', "time": timeLeft });
+      broadcast(wss, { action: 'COUNTDOWN', 'time': `'${timeLeft}'`} );
+      console.log(`{action: 'COUNTDOWN', 'time': ${timeLeft}}`)
     } else {
       clearInterval(countdownInterval);
     }
@@ -166,6 +167,7 @@ function tickGame() {
   const elapsed = (Date.now() - currentRound.startedAt) / 1000;
   const target = 1 + (elapsed / 10); // growth formula for demo
   currentRound.multiplier = Math.min(target * 8, currentRound.crashPoint + 0.05);
+  console.log(`${currentRound.multiplier}`)
   broadcast(wss, {
     action: 'CNT_MULTIPLY',
     multiplier: parseFloat(currentRound.multiplier.toFixed(2)),
