@@ -1,340 +1,307 @@
 // controllers/GameController.js
 const crypto = require("crypto");
+const { Connection, PublicKey } = require("@solana/web3.js");
+const { getAssociatedTokenAddress, getAccount } = require("@solana/spl-token");
+
 const GameRound = require("../models/GameRound");
 const User = require("../models/User");
 const ProvablyFairSeed = require("../models/ProvablyFairSeed");
-const { Connection, PublicKey } = require('@solana/web3.js');
+const GameState = require("../models/GameState");
+const GameConfig = require("../models/GameConfig");
 
-// ----------------- Configuration -----------------
-const RPC_URL = "https://api.mainnet-beta.solana.com"; // Change to devnet if needed
-// const RPC_URL = "https://api.devnet.solana.com";
+// —————————————— CONFIG CACHE (refreshed every 15s) ——————————————
+let CONFIG = {
+  rpcUrl: "https://api.mainnet-beta.solana.com",
+  vaultWallet: "6ZJ1Zy8vE6FivX3vK77LkZq2q9i6CqpNzWWu6hxv7RtW",
+  tokenMint: null,
+  vaultDisplayMultiplier: 8,
+  maxPayoutPercent: 0.30,
+  maxSingleBetRatio: 0.08,
+};
 
-const connection = new Connection(RPC_URL, 'confirmed');
+let connection = new Connection(CONFIG.rpcUrl, "confirmed");
 
-const VAULT_WALLET = new PublicKey("6ZJ1Zy8vE6FivX3vK77LkZq2q9i6CqpNzWWu6hxv7RtW");
-const TOKEN_MINT = null; // null = native SOL | set to USDC mint for tokens
-
-const VAULT_DISPLAY_MULTIPLIER = 8;           // Fake bigger vault shown to players
-const MAX_PAYOUT_PERCENT_OF_VAULT = 0.30;     // NEVER pay out more than 30% in one round
-const MAX_SINGLE_BET_RATIO = 0.08;            // One user can't bet >8% of vault
-const ABSOLUTE_MAX_CRASH = 10.00;             // Highest possible multiplier (from your hash function)
-const VAULT_SYNC_INTERVAL = 15000;            // Refresh vault every 15s
-
-// ----------------- Global State -----------------
-let vault = 0;               // Real on-chain vault (SOL)
-let displayedVault = 0;      // Vault shown to players (inflated)
-let lastKnownVault = 0;
-
-let currentMultiplier = 1.00;
-let gameState = "waiting";   // "waiting" | "running" | "crashed"
-let isRunning = false;
-let timeElapsed = 0;
-
-// ----------------- Vault Sync -----------------
-async function updateVaultFromChain() {
+// Load fresh config from DB
+async function refreshConfig() {
   try {
-    let balance;
-    if (!TOKEN_MINT) {
-      balance = await connection.getBalance(VAULT_WALLET);
-      vault = balance / 1e9;
-    } else {
-      // SPL token support (USDC, etc) - add getAssociatedTokenAddress/getAccount if needed
-      const { getAssociatedTokenAddress, getAccount } = require('@solana/spl-token');
-      const ata = await getAssociatedTokenAddress(TOKEN_MINT, VAULT_WALLET);
-      const account = await getAccount(connection, ata);
-      vault = Number(account.amount) / 1e6; // assuming 6 decimals (USDC)
+    const docs = await GameConfig.find({});
+    const newConfig = {};
+    docs.forEach((doc) => (newConfig[doc.key] = doc.value));
+
+    // Only recreate connection if RPC changed
+    if (newConfig.rpcUrl && newConfig.rpcUrl !== CONFIG.rpcUrl) {
+      connection = new Connection(newConfig.rpcUrl, "confirmed");
+      console.log("RPC updated →", newConfig.rpcUrl);
     }
 
-    lastKnownVault = vault;
-    displayedVault = Math.floor(vault * VAULT_DISPLAY_MULTIPLIER);
-
-    console.log(`Vault: ${vault.toFixed(6)} SOL → Players see: ${displayedVault}`);
+    CONFIG = { ...CONFIG, ...newConfig };
+    console.log("Config refreshed from MongoDB");
   } catch (err) {
-    console.error("Failed to update vault:", err.message);
-    vault = lastKnownVault || vault;
+    console.error("Config refresh failed:", err.message);
   }
 }
 
-// ----------------- Provably Fair -----------------
-function sha256(input) {
-  return crypto.createHash("sha256").update(input).digest("hex");
-}
+// Initial load + every 15 seconds
+refreshConfig();
+setInterval(refreshConfig, 15_000);
 
-async function ensureServerSeed() {
-  let seed = await ProvablyFairSeed.findOne({ revealed: false });
-  if (!seed) {
-    const serverSeed = crypto.randomBytes(32).toString("hex");
-    const serverSeedHash = sha256(serverSeed);
-    seed = new ProvablyFairSeed({ serverSeed, serverSeedHash, revealed: false });
-    await seed.save();
+// —————————————— HELPERS ——————————————
+async function getGameState() {
+  let state = await GameState.findOne({ key: "singleton" });
+  if (!state) {
+    state = new GameState({ key: "singleton" });
+    await state.save();
   }
-  return seed;
+  return state;
 }
 
-function getRoundHash(serverSeed, clientSeed, nonce) {
-  return sha256(`${serverSeed}:${clientSeed}:${nonce}`);
-}
+async function updateVault() {
+  try {
+    const vaultPubkey = new PublicKey(CONFIG.vaultWallet);
+    let balance;
 
-function hashToMultiplier(hash) {
-  const h = parseInt(hash.slice(0, 13), 16);
-  const e = 2 ** 52;
-  const r = h / e;
-  const multiplier = 1.5 + r * 8.5; // 1.5x → 10.0x
-  return parseFloat(multiplier.toFixed(2));
-}
-
-// ----------------- Liability Helpers -----------------
-function getMaxPossiblePayout(round) {
-  if (!round?.bets) return 0;
-  return round.bets
-    .filter(b => !b.cashedOut)
-    .reduce((sum, bet) => sum + bet.amount * ABSOLUTE_MAX_CRASH, 0);
-}
-
-function wouldExceedRiskLimit(currentMaxPayout, newBetAmount) {
-  const projected = currentMaxPayout + (newBetAmount * ABSOLUTE_MAX_CRASH);
-  return projected > vault * MAX_PAYOUT_PERCENT_OF_VAULT;
-}
-
-// ----------------- Broadcast Helper -----------------
-function broadcast(wss, msg) {
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) {
-      client.send(JSON.stringify(msg));
+    if (!CONFIG.tokenMint) {
+      balance = (await connection.getBalance(vaultPubkey)) / 1e9;
+    } else {
+      const mint = new PublicKey(CONFIG.tokenMint);
+      const ata = await getAssociatedTokenAddress(mint, vaultPubkey);
+      const acc = await getAccount(connection, ata);
+      balance = Number(acc.amount) / 1e6; // USDC = 6 decimals
     }
+
+    const state = await getGameState();
+    state.realVault = balance;
+    state.displayedVault = Math.floor(balance * CONFIG.vaultDisplayMultiplier);
+    await state.save();
+
+    return balance;
+  } catch (e) {
+    console.error("Vault update error:", e.message);
+  }
+}
+
+function broadcast(wss, msg) {
+  wss.clients.forEach((ws) => {
+    if (ws.readyState === 1) ws.send(JSON.stringify(msg));
   });
 }
 
-// ----------------- Start New Round -----------------
+// —————————————— MAX LIABILITY ——————————————
+function getMaxLiability(round) {
+  if (!round?.bets) return 0;
+  return round.bets
+    .filter((b) => !b.cashedOut)
+    .reduce((sum, b) => sum + b.amount * 10.0, 0);
+}
+
+// —————————————— START GAME ——————————————
 async function startGame(wss) {
-  await updateVaultFromChain();
+  await updateVault();
 
-  gameState = "waiting";
-  isRunning = false;
-  currentMultiplier = 1.00;
-  timeElapsed = 0;
+  const state = await getGameState();
+  state.gameState = "waiting";
+  state.currentMultiplier = 1.00;
+  state.timeElapsed = 0;
+  await state.save();
 
-  const seedDoc = await ensureServerSeed();
+  const seedDoc = await ensureSeed();
 
   const round = new GameRound({
     startTime: new Date(),
-    crashMultiplier: 0,
-    bets: [],
     seedHash: seedDoc.serverSeedHash,
+    bets: [],
   });
   await round.save();
 
-  broadcast(wss, { action: "GAME_WAITING", vault: displayedVault });
+  state.currentRound = round._id;
+  await state.save();
 
-  // Countdown
-  let countdown = 10;
+  broadcast(wss, { action: "GAME_WAITING", vault: state.displayedVault });
+
+  let cd = 10;
   const timer = setInterval(() => {
-    broadcast(wss, { action: "COUNTDOWN", time: countdown });
-    if (--countdown < 0) clearInterval(timer);
+    broadcast(wss, { action: "COUNTDOWN", time: cd-- });
+    if (cd < 0) clearInterval(timer);
   }, 1000);
 
-  setTimeout(async () => {
-    await startRound(wss, round, seedDoc);
-  }, 11000);
+  setTimeout(() => launchRound(wss, round, seedDoc), 11000);
 }
 
-async function startRound(wss, round, seedDoc) {
-  gameState = "running";
-  isRunning = true;
+// —————————————— LAUNCH ROUND ——————————————
+async function launchRound(wss, round, seedDoc) {
+  const state = await getGameState();
+  state.gameState = "running";
+  await state.save();
 
   const nonce = await GameRound.countDocuments();
-  const clientSeed = "global_client_seed_v1";
-  const roundHash = getRoundHash(seedDoc.serverSeed, clientSeed, nonce);
-  const crashPoint = hashToMultiplier(roundHash);
+  const hash = crypto
+    .createHash("sha256")
+    .update(`${seedDoc.serverSeed}:global:${nonce}`)
+    .digest("hex");
+  const crashPoint = hashToMultiplier(hash);
 
-  round.roundHash = roundHash;
+  round.roundHash = hash;
   round.crashMultiplier = crashPoint;
   await round.save();
 
-  broadcast(wss, {
-    action: "ROUND_STARTED",
-    roundId: round._id,
-    seedHash: seedDoc.serverSeedHash,
-  });
+  broadcast(wss, { action: "ROUND_STARTED", seedHash: seedDoc.serverSeedHash });
 
-  console.log(`Round started | Crash at ${crashPoint}x`);
-
-  const multiplierInterval = setInterval(() => {
-    timeElapsed += 0.05;
-    currentMultiplier = Math.pow(2, timeElapsed / 10);
+  const interval = setInterval(async () => {
+    state.timeElapsed += 0.05;
+    state.currentMultiplier = Math.pow(2, state.timeElapsed / 10);
+    await state.save();
 
     broadcast(wss, {
-      action: "CNT_MULTIPLY",
-      multiplier: parseFloat(currentMultiplier.toFixed(2)),
-      time: timeElapsed,
+      action: "MULTIPLIER_UPDATE",
+      multiplier: Number(state.currentMultiplier.toFixed(2)),
     });
 
-    if (currentMultiplier >= crashPoint) {
-      clearInterval(multiplierInterval);
-      endGame(wss, round._id, crashPoint);
+    if (state.currentMultiplier >= crashPoint) {
+      clearInterval(interval);
+      endRound(wss, round._id, crashPoint);
     }
   }, 50);
 }
 
-// ----------------- End Game -----------------
-async function endGame(wss, roundId, actualCrash) {
-  gameState = "crashed";
-  isRunning = false;
-
-  const round = await GameRound.findById(roundId);
-  if (round) {
-    round.crashMultiplier = actualCrash;
-    await round.save();
-  }
-
-  currentMultiplier = actualCrash;
+// —————————————— END ROUND ——————————————
+async function endRound(wss, roundId, crashPoint) {
+  const state = await getGameState();
+  state.gameState = "crashed";
+  state.currentMultiplier = crashPoint;
+  await state.save();
 
   broadcast(wss, {
     action: "ROUND_CRASHED",
-    multiplier: parseFloat(actualCrash.toFixed(2)),
+    multiplier: Number(crashPoint.toFixed(2)),
   });
-
-  console.log(`CRASHED at ${actualCrash.toFixed(2)}x`);
-
-  // Reveal seed every 100 rounds
-  const total = await GameRound.countDocuments();
-  if (total % 100 === 0) {
-    const seed = await ProvablyFairSeed.findOneAndUpdate(
-      { revealed: false },
-      { revealed: true, revealedAt: new Date() },
-      { new: true }
-    );
-    if (seed) {
-      broadcast(wss, {
-        action: "SEED_REVEALED",
-        serverSeed: seed.serverSeed,
-        serverSeedHash: seed.serverSeedHash,
-      });
-    }
-  }
 
   setTimeout(() => startGame(wss), 5000);
 }
 
-// ----------------- Handle Bet (WITH 30% VAULT PROTECTION) -----------------
+// —————————————— HANDLE BET (30% protection) ——————————————
 async function handleBet(ws, data, wss) {
   try {
     const { walletAddress, amount, currency = "SOL" } = data;
+    const state = await getGameState();
 
-    if (gameState !== "waiting") {
-      return ws.send(JSON.stringify({ action: "ERROR", message: "Betting is closed" }));
+    if (state.gameState !== "waiting") {
+      return ws.send(JSON.stringify({ action: "ERROR", message: "Betting closed" }));
     }
 
-    if (!amount || amount <= 0) {
+    if (amount <= 0) {
       return ws.send(JSON.stringify({ action: "ERROR", message: "Invalid amount" }));
     }
 
-    // Enforce max single bet
-    if (amount > vault * MAX_SINGLE_BET_RATIO) {
-      return ws.send(JSON.stringify({
-        action: "ERROR",
-        message: `Max bet: ${(vault * MAX_SINGLE_BET_RATIO).toFixed(4)} SOL`
-      }));
+    // ——— Use live config values (no await in expression) ———
+    const maxSingleRatio = CONFIG.maxSingleBetRatio || 0.08;
+    const maxPayoutPct = CONFIG.maxPayoutPercent || 0.30;
+
+    if (amount > state.realVault * maxSingleRatio) {
+      return ws.send(
+        JSON.stringify({ action: "ERROR", message: `Max bet: ${(state.realVault * maxSingleRatio).toFixed(4)} SOL` })
+      );
+    }
+
+    const round = await GameRound.findById(state.currentRound);
+    const currentLiability = getMaxLiability(round);
+
+    if (currentLiability + amount * 10.0 > state.realVault * maxPayoutPct) {
+      return ws.send(
+        JSON.stringify({ action: "ERROR", message: "Bet rejected — exceeds house risk limit (30% vault cap)" })
+      );
     }
 
     const user = await User.findOne({ walletAddress });
-    if (!user || (user.balances?.[currency] || 0) < amount) {
+    if (!user || (user.balances[currency] || 0) < amount) {
       return ws.send(JSON.stringify({ action: "ERROR", message: "Insufficient balance" }));
     }
 
-    const round = await GameRound.findOne().sort({ startTime: -1 });
-    if (!round) return ws.send(JSON.stringify({ action: "ERROR", message: "No round active" }));
-
-    // CRITICAL: 30% vault cap check
-    const currentMaxPayout = getMaxPossiblePayout(round);
-    if (wouldExceedRiskLimit(currentMaxPayout, amount)) {
-      const maxAllowed = (vault * MAX_PAYOUT_PERCENT_OF_VAULT - currentMaxPayout) / ABSOLUTE_MAX_CRASH;
-      return ws.send(JSON.stringify({
-        action: "ERROR",
-        message: `Bet rejected — house risk limit reached (30% vault cap)`
-      }));
-    }
-
-    // Deduct from user
-    user.balances[currency] = (user.balances[currency] || 0) - amount;
+    user.balances[currency] -= amount;
     await user.save();
 
-    // Place bet
-    round.bets.push({
-      walletAddress,
-      amount,
-      currency,
-      cashedOut: false
-    });
+    round.bets.push({ walletAddress, amount, currency, cashedOut: false });
     await round.save();
 
-    // Success
-    ws.send(JSON.stringify({ action: "BET_PLACED", amount, currency }));
-
+    ws.send(JSON.stringify({ action: "BET_PLACED" }));
     broadcast(wss, {
       action: "PLAYER_BET",
       walletAddress,
       amount,
-      currency,
-      totalBets: round.bets.length,
-      liabilityPercent: ((getMaxPossiblePayout(round) / vault) * 100).toFixed(2)
+      liabilityPct: ((getMaxLiability(round) / state.realVault) * 100).toFixed(2),
     });
-
-    console.log(`Bet placed: ${amount} SOL | Liability: ${((getMaxPossiblePayout(round) / vault) * 100).toFixed(2)}%`);
-
   } catch (err) {
     console.error("Bet error:", err);
     ws.send(JSON.stringify({ action: "ERROR", message: "Server error" }));
   }
 }
 
-// ----------------- Handle Cashout -----------------
+// —————————————— HANDLE CASHOUT ——————————————
 async function handleCashout(ws, data, wss) {
-  if (!isRunning) {
-    return ws.send(JSON.stringify({ action: "ERROR", message: "Game not running" }));
+  try {
+    const { walletAddress } = data;
+    const state = await getGameState();
+
+    if (state.gameState !== "running") {
+      return ws.send(JSON.stringify({ action: "ERROR", message: "Game not running" }));
+    }
+
+    const round = await GameRound.findById(state.currentRound);
+    const bet = round.bets.find((b) => b.walletAddress === walletAddress && !b.cashedOut);
+    if (!bet) {
+      return ws.send(JSON.stringify({ action: "ERROR", message: "No active bet" }));
+    }
+
+    const payout = Math.floor(bet.amount * state.currentMultiplier * 100) / 100;
+
+    const user = await User.findOne({ walletAddress });
+    user.balances[bet.currency] = (user.balances[bet.currency] || 0) + payout;
+    await user.save();
+
+    bet.cashedOut = true;
+    await round.save();
+
+    ws.send(JSON.stringify({ action: "CASHOUT_SUCCESS", winnings: payout }));
+    broadcast(wss, {
+      action: "PLAYER_CASHED_OUT",
+      walletAddress,
+      winnings: payout,
+      multiplier: Number(state.currentMultiplier.toFixed(2)),
+    });
+  } catch (err) {
+    console.error("Cashout error:", err);
   }
-
-  const { walletAddress } = data;
-  const round = await GameRound.findOne().sort({ startTime: -1 });
-  if (!round) return;
-
-  const bet = round.bets.find(b => b.walletAddress === walletAddress && !b.cashedOut);
-  if (!bet) {
-    return ws.send(JSON.stringify({ action: "ERROR", message: "No active bet" }));
-  }
-
-  const payout = Math.floor(bet.amount * currentMultiplier * 100) / 100; // 2 decimals
-
-  const user = await User.findOne({ walletAddress });
-  user.balances[bet.currency] = (user.balances[bet.currency] || 0) + payout;
-  await user.save();
-
-  bet.cashedOut = true;
-  await round.save();
-
-  ws.send(JSON.stringify({
-    action: "CASHOUT_SUCCESS",
-    winnings: payout,
-    multiplier: parseFloat(currentMultiplier.toFixed(2))
-  }));
-
-  broadcast(wss, {
-    action: "PLAYER_CASHED_OUT",
-    walletAddress,
-    winnings: payout,
-    multiplier: parseFloat(currentMultiplier.toFixed(2))
-  });
 }
 
-// ----------------- Periodic Vault Update -----------------
-setInterval(updateVaultFromChain, VAULT_SYNC_INTERVAL);
-updateVaultFromChain(); // Initial load
+// —————————————— PROVABLY FAIR ——————————————
+async function ensureSeed() {
+  let seed = await ProvablyFairSeed.findOne({ revealed: false });
+  if (!seed) {
+    const serverSeed = crypto.randomBytes(32).toString("hex");
+    seed = new ProvablyFairSeed({
+      serverSeed,
+      serverSeedHash: crypto.createHash("sha256").update(serverSeed).digest("hex"),
+      revealed: false,
+    });
+    await seed.save();
+  }
+  return seed;
+}
 
-// ----------------- Exports -----------------
+function hashToMultiplier(hash) {
+  const h = parseInt(hash.slice(0, 13), 16);
+  const r = h / Math.pow(2, 52);
+  return parseFloat((1.5 + r * 8.5).toFixed(2));
+}
+
+// —————————————— AUTO REFRESH VAULT ——————————————
+setInterval(updateVault, 15_000);
+updateVault();
+
+// Export
 module.exports = {
   startGame,
   handleBet,
   handleCashout,
-  updateVaultFromChain,
-  getMaxPossiblePayout
+  refreshConfig,
+  updateVault,
 };
