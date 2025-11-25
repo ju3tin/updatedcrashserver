@@ -167,7 +167,7 @@ function tickGame() {
   const elapsed = (Date.now() - currentRound.startedAt) / 1000;
   const target = 1 + (elapsed / 10); // growth formula for demo
   currentRound.multiplier = Math.min(target * 8, currentRound.crashPoint + 0.05);
-  console.log(`${currentRound.multiplier}`)
+  console.log(`{"action":"CNT_MULTIPLY","multiplier":${currentRound.multiplier}}`)
   broadcast(wss, {
     action: 'CNT_MULTIPLY',
     multiplier: `${currentRound.multiplier}`,
