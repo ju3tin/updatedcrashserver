@@ -166,6 +166,7 @@ async function startRound(wss, round, seedDoc) {
     broadcast(wss, {
       action: "CNT_MULTIPLY",
       multiplier: parseFloat(currentMultiplier.toFixed(2)),
+      time: timeElapsed,
     });
 
     if (currentMultiplier >= crashPoint) {
