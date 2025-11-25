@@ -170,7 +170,7 @@ function tickGame() {
   console.log(`${currentRound.multiplier}`)
   broadcast(wss, {
     action: 'CNT_MULTIPLY',
-    multiplier: parseFloat(currentRound.multiplier.toFixed(2)),
+    multiplier: `${currentRound.multiplier}`,
     vault: displayedVault,
   });
   if (currentRound.multiplier >= currentRound.crashPoint) endRound();
