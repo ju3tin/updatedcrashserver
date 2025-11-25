@@ -1,33 +1,33 @@
 // server.js
-// Entry point: sets up Express API, static files, WebSocket server and hooks GameController.
-
 require("dotenv").config();
 const express = require("express");
 const http = require("http");
-//const { WebSocketServer } = require("ws").Server;
+const { WebSocketServer } = require("ws");       // ✅ Correct import
 const mongoose = require("mongoose");
 const path = require("path");
 
-// Import controller functions that contain game logic
+// Import controller functions
 const { startGame, handleBet, handleCashout } = require("./controllers/GameController1");
-new WebSocketServer();
+
+// ❌ REMOVE this — it crashes immediately
+// new WebSocketServer();
+
 // Environment variables
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/bustafair";
 const PORT = parseInt(process.env.PORT || "3000", 10);
-const WS_PORT = parseInt(process.env.WS_PORT || "8080", 10);
 
 // Create Express app and HTTP server
 const app = express();
 const httpServer = http.createServer(app);
 
-// Serve static UI files from /public
+// Serve static UI
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
 
 // Connect to MongoDB
 mongoose.connect(MONGODB_URI, {});
 
-// Simple API route to get status (current round + seedHash)
+// Simple API route
 app.get("/api/status", async (req, res) => {
   const GameRound = require("./models/GameRound");
   const lastRound = await GameRound.findOne().sort({ startTime: -1 }).exec();
@@ -43,17 +43,15 @@ httpServer.listen(PORT, () => {
   console.log(`HTTP server listening on http://localhost:${PORT}`);
 });
 
-// Create WebSocket server on same HTTP server (same port), or standalone if you prefer
+// ✅ Create WebSocket server correctly
 const wss = new WebSocketServer({ server: httpServer });
 
-// Manage connected clients and wire incoming messages to controller
+// WebSocket handling
 wss.on("connection", (ws) => {
   console.log("Client connected via WebSocket");
 
-  // Send greeting
   ws.send(JSON.stringify({ action: "WELCOME", message: "Connected to provably-fair crash server" }));
 
-  // Handle incoming JSON messages
   ws.on("message", (raw) => {
     let msg;
     try {
@@ -62,15 +60,11 @@ wss.on("connection", (ws) => {
       return ws.send(JSON.stringify({ action: "ERROR", message: "Invalid JSON" }));
     }
 
-    // Route message types to controller functions
     if (msg.action === "PLACE_BET") {
-      // PLACE_BET payload: { walletAddress, amount, currency }
       handleBet(ws, msg, wss);
     } else if (msg.action === "CASHOUT") {
-      // CASHOUT payload: { walletAddress }
       handleCashout(ws, msg, wss);
     } else if (msg.action === "GET_STATUS") {
-      // Provide current round status
       const GameRound = require("./models/GameRound");
       GameRound.findOne().sort({ startTime: -1 }).then((r) => {
         ws.send(JSON.stringify({ action: "STATUS", round: r }));
