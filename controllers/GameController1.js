@@ -164,7 +164,7 @@ async function startRound(wss, round, seedDoc) {
     currentMultiplier = Math.pow(2, timeElapsed / 10);
 
     broadcast(wss, {
-      action: "MULTIPLIER_UPDATE",
+      action: "CNT_MULTIPLY",
       multiplier: parseFloat(currentMultiplier.toFixed(2)),
     });
 
